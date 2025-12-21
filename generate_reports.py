@@ -1,0 +1,391 @@
+import pandas as pd
+import os
+import re
+import json
+import sys
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Flowable, Table, TableStyle, Indenter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
+from reportlab.graphics.shapes import Drawing, Wedge
+from reportlab.lib.units import cm
+
+def resource_path(relative_path):
+    """
+    Returns the path to a resource.
+    - For icons: uses the bundled folder inside the .exe if PyInstaller included them.
+    - For normal scripts: uses the current directory.
+    """
+    try:
+        # PyInstaller stores bundled files in _MEIPASS
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+def config_path(filename="config.json"):
+    """
+    Returns the path to config/config.json located next to the .exe (or next to .py if running as script)
+    """
+    if getattr(sys, "frozen", False):  # running as .exe
+        base_path = os.path.dirname(sys.executable)
+    else:  # running as script
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, "config", filename)
+
+CONFIG_FILE = config_path()
+with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+    config = json.load(f)
+
+COLOR_GREEN_DARK = colors.HexColor(config["colors"]["green_dark"])
+COLOR_GREEN_LIGHT = colors.HexColor(config["colors"]["green_light"])
+COLOR_YELLOW = colors.HexColor(config["colors"]["yellow"])
+COLOR_RED = colors.HexColor(config["colors"]["red"])
+COLOR_BLACK = colors.HexColor(config["colors"]["black"])
+
+LIMIT_PASS = config["thresholds"]["pass"]
+LIMIT_AVERAGE = config["thresholds"]["average"]
+
+SKILLS = config["skills"]
+EXPECTED_COLUMNS = config["expected_columns"]
+
+TITLE_TEXT = config["texts"]["title"]
+SUBTITLE_TEXT = config["texts"]["subtitle"]
+INTRO_TEXT = config["texts"]["intro_text"]
+PASS_CONCLUSION_TEXT = config["texts"]["pass_conclusion_text"]
+AVERAGE_CONCLUSION_TEXT = config["texts"]["average_conclusion_text"]
+FAIL_CONCLUSION_TEXT = config["texts"]["fail_conclusion_text"]
+
+CONTACTS = config["contacts"]
+
+# -------------------------
+# Utility Functions
+# -------------------------
+def sanitize_filename(name):
+    return re.sub(r'[\/:*?"<>|]', "", name)
+
+def read_input_file(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".csv":
+        df = pd.read_csv(file_path)
+    elif ext in [".xlsx", ".xls"]:
+        df = pd.read_excel(file_path)
+    else:
+        raise ValueError("Unsupported file type. Use .csv or .xlsx")
+    missing = [c for c in EXPECTED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing expected columns: {missing}")
+    return df[EXPECTED_COLUMNS]
+
+# -------------------------
+# Custom Flowables
+# -------------------------
+class SectionHeader(Flowable):
+    def __init__(self, text, width=200, height=30):
+        super().__init__()
+        self.text = text
+        self.width = width
+        self.height = height
+    def draw(self):
+        self.canv.setFillColor(COLOR_GREEN_DARK)
+        self.canv.roundRect(0, 0, self.width, self.height, 10, fill=1, stroke=0)
+        self.canv.setFillColor(colors.white)
+        self.canv.setFont("Helvetica-Bold", 12)
+        self.canv.drawCentredString(self.width/2, self.height/2 - 4, self.text)
+
+class RoundedProgressBar(Flowable):
+    def __init__(self, value, width=200, height=15):
+        super().__init__()
+        try: self.value = float(value)
+        except: self.value = 0.0
+        self.value = max(0.0, min(100.0, self.value))
+        self.width = width
+        self.height = height
+        self.radius = height/2
+        self.bar_color = (
+            COLOR_GREEN_LIGHT if self.value >= LIMIT_PASS else
+            COLOR_YELLOW if self.value >= LIMIT_AVERAGE else
+            COLOR_RED
+        )
+        self.background_color = COLOR_BLACK
+    def draw(self):
+        canv = self.canv
+        canv.saveState()
+        canv.setFillColor(self.background_color)
+        canv.roundRect(0, 0, self.width, self.height, self.radius, fill=1, stroke=0)
+        fill_width = (self.value / 100.0) * self.width
+        if fill_width > 0:
+            canv.setFillColor(self.bar_color)
+            fill_radius = min(self.radius, fill_width/2)
+            canv.roundRect(0, 0, fill_width, self.height, fill_radius, fill=1, stroke=0)
+        canv.setFillColor(colors.black)
+        canv.setFont("Helvetica", 10)
+        canv.drawString(self.width+8, (self.height/2)-3, f"{int(self.value)} %")
+        canv.restoreState()
+
+class SemiCircleGauge(Flowable):
+    def __init__(self, value, width=180, height=120, radius=70, arc_thickness=14):
+        super().__init__()
+        try: self.value = float(value)
+        except: self.value = 0.0
+        self.value = max(0.0, min(100.0, self.value))
+        self.width = width
+        self.height = height
+        self.radius = radius
+        self.arc_thickness = arc_thickness
+        self.inner_radius = max(1, radius - arc_thickness + 3)
+    def draw(self):
+        d = Drawing(self.width, self.height)
+        cx, cy = self.width/2, self.arc_thickness+10
+        gauge_color = (
+            COLOR_GREEN_LIGHT if self.value >= LIMIT_PASS else
+            COLOR_YELLOW if self.value >= LIMIT_AVERAGE else
+            COLOR_RED
+        )
+        progress_angle = 180.0 * (self.value/100.0)
+        d.add(Wedge(cx, cy, self.radius, 0, 180, fillColor=COLOR_BLACK, strokeColor=None))
+        if progress_angle > 0:
+            d.add(Wedge(cx, cy, self.radius, 0, progress_angle, fillColor=gauge_color, strokeColor=None))
+            d.add(Wedge(cx, cy, self.inner_radius, 0, progress_angle, fillColor=colors.white, strokeColor=None))
+        d.add(Wedge(cx, cy, self.inner_radius, 0, 180, fillColor=colors.white, strokeColor=None))
+        self.canv.saveState()
+        self.canv.translate(self.width,0)
+        self.canv.scale(-1,1)
+        d.drawOn(self.canv,0,0)
+        self.canv.restoreState()
+        self.canv.setFont("Helvetica-Bold", 28)
+        self.canv.setFillColor(colors.black)
+        self.canv.drawCentredString(self.width/2, cy+5, f"{int(self.value)} %")
+
+# -------------------------
+# Header & Footer
+# -------------------------
+def draw_header(c, doc):
+    width, height = A4
+    c.saveState()
+
+    c.setFillColor(COLOR_GREEN_DARK)
+    c.setFont("Helvetica-Bold", 20)
+
+    # Logo (left)
+    logo_path = resource_path("icons/logo.png")
+    if os.path.exists(logo_path):
+        c.drawImage(
+            logo_path,
+            40,
+            height - 85,
+            width=140,
+            height=50,
+            preserveAspectRatio=True,
+            mask='auto'
+        )
+
+    # Subtitle (RIGHT ALIGNED)
+    c.setFont("Helvetica", 14)
+    c.setFillColor(COLOR_BLACK)
+    subtitle_width = c.stringWidth(SUBTITLE_TEXT, "Helvetica", 14)
+    subtitle_x = width - subtitle_width - 40   # right margin
+    c.drawString(subtitle_x, height - 80, SUBTITLE_TEXT)
+
+    # Line
+    c.setStrokeColor(COLOR_GREEN_DARK)
+    c.setLineWidth(2)
+    c.line(40, height - 85, width - 40, height - 85)
+
+    c.restoreState()
+
+def draw_footer(c, doc):
+    width, height = A4
+    margin_bottom = 0
+    FOOTER_HEIGHT = 60
+    SIDE_MARGIN = 50
+    ICON_WIDTH = 20
+    ICON_HEIGHT = 20
+    TEXT_ICON_PADDING = 5
+    TEXT_LINE_HEIGHT = 12
+
+    contacts = [
+        (resource_path("icons/phone.png"), CONTACTS["phone"], "tel"),
+        (resource_path("icons/email.png"), [CONTACTS["email"]], "mailto"),
+        (resource_path("icons/web.png"), [CONTACTS["website"]], "url")
+    ]
+
+    c.setFillColor(COLOR_GREEN_DARK)
+    c.rect(0, margin_bottom, width, FOOTER_HEIGHT, fill=1, stroke=0)
+    footer_center_y = margin_bottom + FOOTER_HEIGHT / 2
+
+    for i, (icon_path, text_lines, link_type) in enumerate(contacts):
+        if i == 0:
+            icon_x = SIDE_MARGIN
+        elif i == 1:
+            total_text_width = max(c.stringWidth(line, "Helvetica", 10) for line in text_lines)
+            est_width = ICON_WIDTH + TEXT_ICON_PADDING + total_text_width
+            icon_x = (width / 2) - (est_width / 2)
+        else:
+            total_text_width = max(c.stringWidth(line, "Helvetica", 10) for line in text_lines)
+            total_block_width = ICON_WIDTH + TEXT_ICON_PADDING + total_text_width
+            icon_x = width - SIDE_MARGIN - total_block_width
+
+        icon_y = footer_center_y - ICON_HEIGHT / 2
+
+        if os.path.exists(icon_path):
+            c.drawImage(icon_path, icon_x, icon_y, width=ICON_WIDTH, height=ICON_HEIGHT,
+                        preserveAspectRatio=True, mask='auto')
+        else:
+            c.setFillColor(colors.black)
+            c.circle(icon_x + ICON_WIDTH / 2, icon_y + ICON_HEIGHT / 2, ICON_WIDTH / 2, fill=1, stroke=0)
+
+        c.setFont("Helvetica", 10)
+        c.setFillColor(colors.white)
+        num_lines = len(text_lines)
+        total_block_height = TEXT_LINE_HEIGHT * num_lines
+        text_start_y = footer_center_y + (total_block_height / 2) - TEXT_LINE_HEIGHT + 2
+        text_x = icon_x + ICON_WIDTH + TEXT_ICON_PADDING
+
+        for j, line in enumerate(text_lines):
+            line_y = text_start_y - j * TEXT_LINE_HEIGHT
+            c.drawString(text_x, line_y, line)
+            if link_type == "tel":
+                link_url = f"tel:{line}"
+            elif link_type == "mailto":
+                link_url = f"mailto:{line}"
+            else:
+                link_url = line if line.startswith("http") else f"https://{line}"
+            text_width = c.stringWidth(line, "Helvetica", 10)
+            text_height = TEXT_LINE_HEIGHT
+            c.linkURL(link_url, (text_x, line_y, text_x + text_width, line_y + text_height), relative=0)
+
+# -------------------------
+# Generate PDF per student
+# -------------------------
+def generate_student_pdf(student_row, output_folder):
+    alumno = student_row["Alumno/a"]
+    exam_amount = student_row["Exámenes realizados"]
+    certificacion = student_row["Certificación"]
+    safe_name = sanitize_filename(alumno)
+    output_filename = os.path.join(output_folder, f"{safe_name}.pdf")
+
+    doc = SimpleDocTemplate(
+        output_filename,
+        pagesize=A4,
+        rightMargin=40,
+        leftMargin=40,
+        topMargin=100,
+        bottomMargin=70
+    )
+
+    styles = getSampleStyleSheet()
+    elements = []
+
+    style_info_label = ParagraphStyle('InfoLabel', parent=styles['Normal'], fontSize=12, leading=13)
+    style_info_data = ParagraphStyle('InfoData', parent=styles['Heading3'], fontSize=14, leading=16, spaceAfter=5)
+    style_justified = ParagraphStyle('justify', parent=styles['Normal'], alignment=TA_JUSTIFY, leading=12, fontSize=11)
+
+    if INTRO_TEXT:
+        elements.append(Paragraph(INTRO_TEXT, style_justified))
+        elements.append(Spacer(1, 10))
+
+    data_info = [
+        [Paragraph("<b>ALUMNO/A:</b>", style_info_label),
+        Paragraph("<b>CERTIFICACIÓN:</b>", style_info_label)],
+        [Paragraph(str(alumno), style_info_data),
+         Paragraph(str(certificacion), style_info_data)]
+    ]
+    t_info = Table(data_info, colWidths=[300, 200])
+    t_info.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('LEFTPADDING', (0,0), (-1,-1), 0),
+        ('BOTTOMPADDING', (0,1), (-1,1), 12)
+    ]))
+    elements.append(t_info)
+    elements.append(Spacer(1, 5))
+
+    data_info = [
+        [Paragraph("<b>EXÁMENES REALIZADOS:</b>", style_info_label)],
+        [Paragraph(str(exam_amount), style_info_data)]
+    ]
+    t_info = Table(data_info, colWidths=[500])
+    t_info.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('LEFTPADDING', (0,0), (-1,-1), 0),
+        ('BOTTOMPADDING', (0,1), (-1,1), 12),
+        ('LINEBELOW', (0,1), (-1,1), 1.2, colors.grey),
+    ]))
+    elements.append(t_info)
+    elements.append(Spacer(1, 5))
+
+    notes = [student_row[skill] for skill in SKILLS]
+    avg_note = sum(notes) / len(notes)
+
+    left_content = [SectionHeader("CALIFICACIÓN INDIVIDUAL", width=240, height=25), Spacer(1, 8)]
+    for skill, note in zip(SKILLS, notes):
+        left_content.append(Paragraph(skill, ParagraphStyle('label', parent=styles['Normal'], leading=12, fontSize=11)))
+        left_content.append(Spacer(1, 3))
+        left_content.append(RoundedProgressBar(note, width=210))
+        left_content.append(Spacer(1, 15))
+
+    right_content = [
+        SectionHeader("CALIFICACIÓN TOTAL", width=200, height=25),
+        Indenter(10, 0),
+        SemiCircleGauge(avg_note),
+        Spacer(1, 2),
+        Indenter(-10, 0),
+        SectionHeader("ESTADO", width=200, height=20),
+        Paragraph(f"{'APTO/A' if avg_note >= LIMIT_AVERAGE else 'NO APTO/A'}",
+                  ParagraphStyle('status', parent=styles['Heading3'], alignment=TA_CENTER, fontSize=16)),
+    ]
+
+    main_table_data = [[left_content, right_content]]
+    main_table = Table(main_table_data, colWidths=[270, 230])
+    main_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('LEFTPADDING', (1,0), (1,0), 20)
+    ]))
+    elements.append(main_table)
+    elements.append(Spacer(1, 10))
+
+    if avg_note >= LIMIT_PASS and PASS_CONCLUSION_TEXT:
+        elements.append(Paragraph(PASS_CONCLUSION_TEXT, style_justified))
+    elif avg_note < LIMIT_PASS and avg_note >= LIMIT_AVERAGE and AVERAGE_CONCLUSION_TEXT:
+        elements.append(Paragraph(AVERAGE_CONCLUSION_TEXT, style_justified))
+    elif avg_note < LIMIT_AVERAGE and FAIL_CONCLUSION_TEXT:
+        elements.append(Paragraph(FAIL_CONCLUSION_TEXT, style_justified))
+
+    doc.build(
+        elements,
+        onFirstPage=lambda c,d: (draw_header(c,d), draw_footer(c,d)),
+        onLaterPages=lambda c,d: (draw_header(c,d), draw_footer(c,d))
+    )
+
+# -------------------------
+# GUI File Selection & Run
+# -------------------------
+def choose_file_and_run():
+    root = tk.Tk()
+    root.withdraw()
+
+    file_path = filedialog.askopenfilename(
+        title="Select input file (CSV or Excel)",
+        filetypes=[("Excel files", "*.xlsx *.xls"), ("CSV files", "*.csv")]
+    )
+
+    if not file_path:
+        messagebox.showinfo("No file selected", "You must select a CSV or Excel file to continue.")
+        return
+
+    output_folder = "reports"
+    os.makedirs(output_folder, exist_ok=True)
+
+    try:
+        df = read_input_file(file_path)
+        for _, row in df.iterrows():
+            generate_student_pdf(row, output_folder)
+        messagebox.showinfo("Success", f"All PDFs generated in '{output_folder}'!")
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+
+if __name__ == "__main__":
+    choose_file_and_run()

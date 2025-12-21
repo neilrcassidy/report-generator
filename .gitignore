@@ -1,0 +1,6 @@
+students_reports/
+~$students.xlsx
+*.spec
+build/
+dist/
+reports/
