@@ -34,14 +34,12 @@ def config_path(filename="config.json"):
     if getattr(sys, "frozen", False):  # running as .exe
         base_path = os.path.dirname(sys.executable)
     else:  # running as script
-        # This ensures it finds the directory where the .py file actually lives
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, "config", filename)
 
 # --- Safety Check for Config File ---
 CONFIG_FILE = config_path()
 if not os.path.exists(CONFIG_FILE):
-    # If the .exe can't find the config folder next to it, alert the user and stop.
     root = tk.Tk()
     root.withdraw()
     messagebox.showerror("Error", f"Configuration file missing!\n\nPlease make sure the 'config' folder and 'config.json' are located here:\n{os.path.dirname(CONFIG_FILE)}")
@@ -64,6 +62,7 @@ INTRO_TEXT = config["texts"]["intro_text"]
 PASS_CONCLUSION_TEXT = config["texts"]["pass_conclusion_text"]
 AVERAGE_CONCLUSION_TEXT = config["texts"]["average_conclusion_text"]
 FAIL_CONCLUSION_TEXT = config["texts"]["fail_conclusion_text"]
+DOUBT_TEXT = config["texts"]["doubt_text"]
 
 CONTACTS = config["contacts"]
 
@@ -74,7 +73,6 @@ def clean_filename(name):
     return re.sub(r'[\/:*?"<>|]', "", name)
 
 def read_input_file(file_path):
-    # 1. Read the file
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".csv":
         df = pd.read_csv(file_path)
@@ -83,22 +81,17 @@ def read_input_file(file_path):
     else:
         raise ValueError("Unsupported file format. Please use .csv or .xlsx.")
     
-    # 2. Check for missing columns
     missing = [c for c in EXPECTED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"The following required columns are missing in the file:\n{', '.join(missing)}")
 
-    # Filter to only the columns we care about
     df = df[EXPECTED_COLUMNS].copy()
 
-    # 3. Check for empty (blank) cells
     if df.isnull().values.any():
-        # Find the names of students with missing data (or a fallback string if the name itself is missing)
         problem_rows = df[df.isnull().any(axis=1)]
         student_names = problem_rows["STUDENT"].fillna("Missing name").tolist()
         raise ValueError(f"There are empty cells in the data. Please check the following students:\n{', '.join(student_names)}")
 
-    # 4. Check for valid certifications (Must match config.json)
     valid_certs = []
     for cert_set in config["certification_skills_sets"]:
         valid_certs.extend(cert_set["certifications"])
@@ -110,10 +103,8 @@ def read_input_file(file_path):
             f"Allowed certifications in the configuration are: {', '.join(valid_certs)}"
         )
 
-    # 5. Check that skill grades are actually numbers
     skill_columns = [col for col in EXPECTED_COLUMNS if col not in ["STUDENT", "EXAMS DONE", "CERTIFICATION"]]
     for col in skill_columns:
-        # Attempt to convert the column to numeric. If it fails, it throws an error.
         try:
             df[col] = pd.to_numeric(df[col])
         except ValueError:
@@ -213,7 +204,7 @@ def draw_header(c, doc):
     c.setFillColor(COLOR_GREEN_DARK)
     c.setFont("Helvetica-Bold", 20)
 
-    # Logo (left)
+    # Logo
     logo_path = resource_path("icons/logo.png")
     if os.path.exists(logo_path):
         c.drawImage(
@@ -226,11 +217,11 @@ def draw_header(c, doc):
             mask='auto'
         )
 
-    # Subtitle (RIGHT ALIGNED)
+    # Subtitle
     c.setFont("Helvetica", 14)
     c.setFillColor(COLOR_BLACK)
     subtitle_width = c.stringWidth(SUBTITLE_TEXT, "Helvetica", 14)
-    subtitle_x = width - subtitle_width - 40   # right margin
+    subtitle_x = width - subtitle_width - 40
     c.drawString(subtitle_x, height - 80, SUBTITLE_TEXT)
 
     # Line
@@ -250,8 +241,11 @@ def draw_footer(c, doc):
     TEXT_ICON_PADDING = 5
     TEXT_LINE_HEIGHT = 12
 
+    phone_numbers = [CONTACTS["phone"]["landline"], CONTACTS["phone"]["mobile"]]
+    phone_lines = [num for num in phone_numbers if num]
+
     contacts = [
-        (resource_path("icons/phone.png"), CONTACTS["phone"], "tel"),
+        (resource_path("icons/phone.png"), phone_lines, "tel"),
         (resource_path("icons/email.png"), [CONTACTS["email"]], "mailto"),
         (resource_path("icons/web.png"), [CONTACTS["website"]], "url")
     ]
@@ -339,6 +333,7 @@ def generate_student_pdf(student_row, output_folder):
 
     elements = []
     if INTRO_TEXT:
+        # Dynamically inject the limit_pass into the intro text
         formatted_intro = INTRO_TEXT.replace("{min_pass}", str(limit_pass))
         elements.append(Paragraph(formatted_intro, style_justified))
         elements.append(Spacer(1, 10))
@@ -402,12 +397,19 @@ def generate_student_pdf(student_row, output_folder):
     elements.append(main_table)
     elements.append(Spacer(1, 10))
 
+    mobile_num = CONTACTS["phone"]["mobile"]
+    clean_num = mobile_num.replace(" ", "")
+    
+    formatted_doubt_text = ""
+    if DOUBT_TEXT and mobile_num:
+        formatted_doubt_text = DOUBT_TEXT.format(mobile_clean=clean_num, mobile_display=mobile_num)
+
     if avg_note >= limit_pass and PASS_CONCLUSION_TEXT:
-        elements.append(Paragraph(PASS_CONCLUSION_TEXT, style_justified))
+        elements.append(Paragraph(PASS_CONCLUSION_TEXT + formatted_doubt_text, style_justified))
     elif avg_note < limit_pass and avg_note >= limit_average and AVERAGE_CONCLUSION_TEXT:
-        elements.append(Paragraph(AVERAGE_CONCLUSION_TEXT, style_justified))
+        elements.append(Paragraph(AVERAGE_CONCLUSION_TEXT + formatted_doubt_text, style_justified))
     elif avg_note < limit_average and FAIL_CONCLUSION_TEXT:
-        elements.append(Paragraph(FAIL_CONCLUSION_TEXT, style_justified))
+        elements.append(Paragraph(FAIL_CONCLUSION_TEXT + formatted_doubt_text, style_justified))
 
     doc.build(
         elements,
