@@ -56,9 +56,6 @@ COLOR_YELLOW = colors.HexColor(config["colors"]["yellow"])
 COLOR_RED = colors.HexColor(config["colors"]["red"])
 COLOR_BLACK = colors.HexColor(config["colors"]["black"])
 
-LIMIT_PASS = config["thresholds"]["pass"]
-LIMIT_AVERAGE = config["thresholds"]["average"]
-
 EXPECTED_COLUMNS = config["expected_columns"]
 
 TITLE_TEXT = config["texts"]["title"]
@@ -141,7 +138,7 @@ class SectionHeader(Flowable):
         self.canv.drawCentredString(self.width/2, self.height/2 - 4, self.text)
 
 class RoundedProgressBar(Flowable):
-    def __init__(self, value, width=200, height=15):
+    def __init__(self, value, limit_pass, limit_average, width=200, height=15):
         super().__init__()
         try: self.value = float(value)
         except: self.value = 0.0
@@ -150,8 +147,8 @@ class RoundedProgressBar(Flowable):
         self.height = height
         self.radius = height/2
         self.bar_color = (
-            COLOR_GREEN_LIGHT if self.value >= LIMIT_PASS else
-            COLOR_YELLOW if self.value >= LIMIT_AVERAGE else
+            COLOR_GREEN_LIGHT if self.value >= limit_pass else
+            COLOR_YELLOW if self.value >= limit_average else
             COLOR_RED
         )
         self.background_color = COLOR_BLACK
@@ -171,7 +168,7 @@ class RoundedProgressBar(Flowable):
         canv.restoreState()
 
 class SemiCircleGauge(Flowable):
-    def __init__(self, value, width=180, height=120, radius=70, arc_thickness=14):
+    def __init__(self, value, limit_pass, limit_average, width=180, height=120, radius=70, arc_thickness=14):
         super().__init__()
         try: self.value = float(value)
         except: self.value = 0.0
@@ -181,12 +178,14 @@ class SemiCircleGauge(Flowable):
         self.radius = radius
         self.arc_thickness = arc_thickness
         self.inner_radius = max(1, radius - arc_thickness + 3)
+        self.limit_pass = limit_pass
+        self.limit_average = limit_average
     def draw(self):
         d = Drawing(self.width, self.height)
         cx, cy = self.width/2, self.arc_thickness+10
         gauge_color = (
-            COLOR_GREEN_LIGHT if self.value >= LIMIT_PASS else
-            COLOR_YELLOW if self.value >= LIMIT_AVERAGE else
+            COLOR_GREEN_LIGHT if self.value >= self.limit_pass else
+            COLOR_YELLOW if self.value >= self.limit_average else
             COLOR_RED
         )
         progress_angle = 180.0 * (self.value/100.0)
@@ -311,9 +310,15 @@ def generate_student_pdf(student_row, output_folder):
     certification = student_row["CERTIFICATION"]
 
     skills = []
+    limit_pass = 70
+    limit_average = 60
+    
+    # Dynamically extract limits based on student's certification
     for certification_skills_set in config["certification_skills_sets"]:
         if certification in certification_skills_set["certifications"]:
             skills = certification_skills_set["skills"]
+            limit_pass = certification_skills_set.get("pass_threshold", 70)
+            limit_average = certification_skills_set.get("average_threshold", 60)
             
     safe_name = clean_filename(student)
     output_filename = os.path.join(output_folder, f"{safe_name}.pdf")
@@ -334,7 +339,8 @@ def generate_student_pdf(student_row, output_folder):
 
     elements = []
     if INTRO_TEXT:
-        elements.append(Paragraph(INTRO_TEXT, style_justified))
+        formatted_intro = INTRO_TEXT.replace("{min_pass}", str(limit_pass))
+        elements.append(Paragraph(formatted_intro, style_justified))
         elements.append(Spacer(1, 10))
 
     data_info = [
@@ -373,17 +379,17 @@ def generate_student_pdf(student_row, output_folder):
     for skill, note in zip(skills, notes):
         left_content.append(Paragraph(skill, ParagraphStyle('label', parent=styles['Normal'], leading=12, fontSize=11)))
         left_content.append(Spacer(1, 3))
-        left_content.append(RoundedProgressBar(note, width=210))
+        left_content.append(RoundedProgressBar(note, limit_pass, limit_average, width=210))
         left_content.append(Spacer(1, 15))
 
     right_content = [
         SectionHeader("CALIFICACIÓN TOTAL", width=200, height=25),
         Indenter(10, 0),
-        SemiCircleGauge(avg_note),
+        SemiCircleGauge(avg_note, limit_pass, limit_average),
         Spacer(1, 2),
         Indenter(-10, 0),
         SectionHeader("ESTADO", width=200, height=20),
-        Paragraph(f"{'APTO/A' if avg_note >= LIMIT_AVERAGE else 'NO APTO/A'}",
+        Paragraph(f"{'APTO/A' if avg_note >= limit_pass else 'NO APTO/A'}",
                   ParagraphStyle('status', parent=styles['Heading3'], alignment=TA_CENTER, fontSize=16)),
     ]
 
@@ -396,11 +402,11 @@ def generate_student_pdf(student_row, output_folder):
     elements.append(main_table)
     elements.append(Spacer(1, 10))
 
-    if avg_note >= LIMIT_PASS and PASS_CONCLUSION_TEXT:
+    if avg_note >= limit_pass and PASS_CONCLUSION_TEXT:
         elements.append(Paragraph(PASS_CONCLUSION_TEXT, style_justified))
-    elif avg_note < LIMIT_PASS and avg_note >= LIMIT_AVERAGE and AVERAGE_CONCLUSION_TEXT:
+    elif avg_note < limit_pass and avg_note >= limit_average and AVERAGE_CONCLUSION_TEXT:
         elements.append(Paragraph(AVERAGE_CONCLUSION_TEXT, style_justified))
-    elif avg_note < LIMIT_AVERAGE and FAIL_CONCLUSION_TEXT:
+    elif avg_note < limit_average and FAIL_CONCLUSION_TEXT:
         elements.append(Paragraph(FAIL_CONCLUSION_TEXT, style_justified))
 
     doc.build(
