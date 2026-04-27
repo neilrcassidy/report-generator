@@ -28,15 +28,25 @@ def resource_path(relative_path):
 
 def config_path(filename="config.json"):
     """
-    Returns the path to config/config.json located next to the .exe (or next to .py if running as script)
+    Returns the path to config/config.json located next to the .exe 
+    (or next to .py if running as script)
     """
     if getattr(sys, "frozen", False):  # running as .exe
         base_path = os.path.dirname(sys.executable)
     else:  # running as script
-        base_path = os.path.abspath(".")
+        # This ensures it finds the directory where the .py file actually lives
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, "config", filename)
 
+# --- Safety Check for Config File ---
 CONFIG_FILE = config_path()
+if not os.path.exists(CONFIG_FILE):
+    # If the .exe can't find the config folder next to it, alert the user and stop.
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror("Error", f"Configuration file missing!\n\nPlease make sure the 'config' folder and 'config.json' are located here:\n{os.path.dirname(CONFIG_FILE)}")
+    sys.exit(1)
+
 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
     config = json.load(f)
 
@@ -49,7 +59,6 @@ COLOR_BLACK = colors.HexColor(config["colors"]["black"])
 LIMIT_PASS = config["thresholds"]["pass"]
 LIMIT_AVERAGE = config["thresholds"]["average"]
 
-SKILLS = config["skills"]
 EXPECTED_COLUMNS = config["expected_columns"]
 
 TITLE_TEXT = config["texts"]["title"]
@@ -64,21 +73,56 @@ CONTACTS = config["contacts"]
 # -------------------------
 # Utility Functions
 # -------------------------
-def sanitize_filename(name):
+def clean_filename(name):
     return re.sub(r'[\/:*?"<>|]', "", name)
 
 def read_input_file(file_path):
+    # 1. Read the file
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".csv":
         df = pd.read_csv(file_path)
     elif ext in [".xlsx", ".xls"]:
         df = pd.read_excel(file_path)
     else:
-        raise ValueError("Unsupported file type. Use .csv or .xlsx")
+        raise ValueError("Unsupported file format. Please use .csv or .xlsx.")
+    
+    # 2. Check for missing columns
     missing = [c for c in EXPECTED_COLUMNS if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing expected columns: {missing}")
-    return df[EXPECTED_COLUMNS]
+        raise ValueError(f"The following required columns are missing in the file:\n{', '.join(missing)}")
+
+    # Filter to only the columns we care about
+    df = df[EXPECTED_COLUMNS].copy()
+
+    # 3. Check for empty (blank) cells
+    if df.isnull().values.any():
+        # Find the names of students with missing data (or a fallback string if the name itself is missing)
+        problem_rows = df[df.isnull().any(axis=1)]
+        student_names = problem_rows["STUDENT"].fillna("Missing name").tolist()
+        raise ValueError(f"There are empty cells in the data. Please check the following students:\n{', '.join(student_names)}")
+
+    # 4. Check for valid certifications (Must match config.json)
+    valid_certs = []
+    for cert_set in config["certification_skills_sets"]:
+        valid_certs.extend(cert_set["certifications"])
+
+    invalid_certs = df[~df["CERTIFICATION"].isin(valid_certs)]["STUDENT"].tolist()
+    if invalid_certs:
+        raise ValueError(
+            f"Invalid certification for the following students: {', '.join(invalid_certs)}.\n"
+            f"Allowed certifications in the configuration are: {', '.join(valid_certs)}"
+        )
+
+    # 5. Check that skill grades are actually numbers
+    skill_columns = [col for col in EXPECTED_COLUMNS if col not in ["STUDENT", "EXAMS DONE", "CERTIFICATION"]]
+    for col in skill_columns:
+        # Attempt to convert the column to numeric. If it fails, it throws an error.
+        try:
+            df[col] = pd.to_numeric(df[col])
+        except ValueError:
+            raise ValueError(f"Column '{col}' contains letters or symbols instead of numbers. Please correct it.")
+
+    return df
 
 # -------------------------
 # Custom Flowables
@@ -262,10 +306,16 @@ def draw_footer(c, doc):
 # Generate PDF per student
 # -------------------------
 def generate_student_pdf(student_row, output_folder):
-    alumno = student_row["Alumno/a"]
-    exam_amount = student_row["Exámenes realizados"]
-    certificacion = student_row["Certificación"]
-    safe_name = sanitize_filename(alumno)
+    student = student_row["STUDENT"]
+    exam_amount = student_row["EXAMS DONE"]
+    certification = student_row["CERTIFICATION"]
+
+    skills = []
+    for certification_skills_set in config["certification_skills_sets"]:
+        if certification in certification_skills_set["certifications"]:
+            skills = certification_skills_set["skills"]
+            
+    safe_name = clean_filename(student)
     output_filename = os.path.join(output_folder, f"{safe_name}.pdf")
 
     doc = SimpleDocTemplate(
@@ -278,12 +328,11 @@ def generate_student_pdf(student_row, output_folder):
     )
 
     styles = getSampleStyleSheet()
-    elements = []
-
     style_info_label = ParagraphStyle('InfoLabel', parent=styles['Normal'], fontSize=12, leading=13)
     style_info_data = ParagraphStyle('InfoData', parent=styles['Heading3'], fontSize=14, leading=16, spaceAfter=5)
     style_justified = ParagraphStyle('justify', parent=styles['Normal'], alignment=TA_JUSTIFY, leading=12, fontSize=11)
 
+    elements = []
     if INTRO_TEXT:
         elements.append(Paragraph(INTRO_TEXT, style_justified))
         elements.append(Spacer(1, 10))
@@ -291,8 +340,8 @@ def generate_student_pdf(student_row, output_folder):
     data_info = [
         [Paragraph("<b>ALUMNO/A:</b>", style_info_label),
         Paragraph("<b>CERTIFICACIÓN:</b>", style_info_label)],
-        [Paragraph(str(alumno), style_info_data),
-         Paragraph(str(certificacion), style_info_data)]
+        [Paragraph(str(student), style_info_data),
+         Paragraph(str(certification), style_info_data)]
     ]
     t_info = Table(data_info, colWidths=[300, 200])
     t_info.setStyle(TableStyle([
@@ -317,11 +366,11 @@ def generate_student_pdf(student_row, output_folder):
     elements.append(t_info)
     elements.append(Spacer(1, 5))
 
-    notes = [student_row[skill] for skill in SKILLS]
+    notes = [student_row[skill] for skill in skills]
     avg_note = sum(notes) / len(notes)
 
     left_content = [SectionHeader("CALIFICACIÓN INDIVIDUAL", width=240, height=25), Spacer(1, 8)]
-    for skill, note in zip(SKILLS, notes):
+    for skill, note in zip(skills, notes):
         left_content.append(Paragraph(skill, ParagraphStyle('label', parent=styles['Normal'], leading=12, fontSize=11)))
         left_content.append(Spacer(1, 3))
         left_content.append(RoundedProgressBar(note, width=210))
