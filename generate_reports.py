@@ -59,6 +59,9 @@ PASS_CONCLUSION_TEXT = config["texts"]["pass_conclusion_text"]
 AVERAGE_CONCLUSION_TEXT = config["texts"]["average_conclusion_text"]
 FAIL_CONCLUSION_TEXT = config["texts"]["fail_conclusion_text"]
 DOUBT_TEXT = config["texts"].get("doubt_text", "")
+STATUS_PASS = config["texts"].get("status_pass", "APTO/A")
+STATUS_AVERAGE = config["texts"].get("status_average", "APTO/A<br/>(con observaciones)")
+STATUS_FAIL = config["texts"].get("status_fail", "NO APTO/A")
 
 CONTACTS = config["contacts"]
 
@@ -430,11 +433,11 @@ def generate_student_pdf(student_row, output_folder, index):
 
     # Determine status text based on the three tiers
     if avg_note >= limit_pass:
-        status_text = "APTO/A"
+        status_text = STATUS_PASS
     elif avg_note >= limit_average:
-        status_text = "APTO/A<br/>(con observaciones)"
+        status_text = STATUS_AVERAGE
     else:
-        status_text = "NO APTO/A"
+        status_text = STATUS_FAIL
 
     right_content = [
         SectionHeader("CALIFICACIÓN TOTAL", width=200, height=25),
