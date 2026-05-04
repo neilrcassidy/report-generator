@@ -14,13 +14,7 @@ from reportlab.graphics.shapes import Drawing, Wedge
 from reportlab.lib.units import cm
 
 def resource_path(relative_path):
-    """
-    Returns the path to a resource.
-    - For icons: uses the bundled folder inside the .exe if PyInstaller included them.
-    - For normal scripts: uses the current directory.
-    """
     try:
-        # PyInstaller stores bundled files in _MEIPASS
         base_path = sys._MEIPASS
     except AttributeError:
         base_path = os.path.abspath(".")
@@ -33,11 +27,10 @@ def config_path(filename="config.json"):
     """
     if getattr(sys, "frozen", False):  # running as .exe
         base_path = os.path.dirname(sys.executable)
-    else:  # running as script
+    else:
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, "config", filename)
 
-# --- Safety Check for Config File ---
 CONFIG_FILE = config_path()
 if not os.path.exists(CONFIG_FILE):
     root = tk.Tk()
@@ -48,21 +41,24 @@ if not os.path.exists(CONFIG_FILE):
 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
     config = json.load(f)
 
+# Colors
 COLOR_GREEN_DARK = colors.HexColor(config["colors"]["green_dark"])
 COLOR_GREEN_LIGHT = colors.HexColor(config["colors"]["green_light"])
 COLOR_YELLOW = colors.HexColor(config["colors"]["yellow"])
 COLOR_RED = colors.HexColor(config["colors"]["red"])
 COLOR_BLACK = colors.HexColor(config["colors"]["black"])
 
-EXPECTED_COLUMNS = config["expected_columns"]
+# Hardcoded Base Columns
+BASE_COLUMNS = ["STUDENT", "EXAMS DONE", "CERTIFICATION"]
 
+# Texts
 TITLE_TEXT = config["texts"]["title"]
 SUBTITLE_TEXT = config["texts"]["subtitle"]
 INTRO_TEXT = config["texts"]["intro_text"]
 PASS_CONCLUSION_TEXT = config["texts"]["pass_conclusion_text"]
 AVERAGE_CONCLUSION_TEXT = config["texts"]["average_conclusion_text"]
 FAIL_CONCLUSION_TEXT = config["texts"]["fail_conclusion_text"]
-DOUBT_TEXT = config["texts"]["doubt_text"]
+DOUBT_TEXT = config["texts"].get("doubt_text", "")
 
 CONTACTS = config["contacts"]
 
@@ -73,42 +69,99 @@ def clean_filename(name):
     return re.sub(r'[\/:*?"<>|]', "", name)
 
 def read_input_file(file_path):
+    # 1. Read the file
     ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".csv":
-        df = pd.read_csv(file_path)
-    elif ext in [".xlsx", ".xls"]:
-        df = pd.read_excel(file_path)
-    else:
-        raise ValueError("Unsupported file format. Please use .csv or .xlsx.")
     
-    missing = [c for c in EXPECTED_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(f"The following required columns are missing in the file:\n{', '.join(missing)}")
+    try:
+        if ext == ".csv":
+            df = pd.read_csv(file_path)
+        elif ext in [".xlsx", ".xls"]:
+            df = pd.read_excel(file_path)
+        elif ext == ".ods":
+            df = pd.read_excel(file_path, engine="odf")
+        else:
+            raise ValueError(f"Unsupported file format '{ext}'. Please use .xlsx, .xls, .csv, or .ods.")
+    except Exception as e:
+        raise ValueError(f"Could not read the file. Ensure it is formatted correctly.\nDetails: {str(e)}")
+    
+    # 2. Extract ALL unique skills from the config
+    all_possible_skills = set()
+    for cert_set in config["certification_skills_sets"]:
+        all_possible_skills.update(cert_set["skills"])
+    all_possible_skills = list(all_possible_skills)
 
-    df = df[EXPECTED_COLUMNS].copy()
+    # 3. Check for base columns
+    missing_base = [c for c in BASE_COLUMNS if c not in df.columns]
+    if missing_base:
+        raise ValueError(f"The following basic columns are missing in the file:\n{', '.join(missing_base)}")
 
-    if df.isnull().values.any():
-        problem_rows = df[df.isnull().any(axis=1)]
+    # --- NEW CODE: DROP GHOST ROWS ---
+    # This automatically deletes any hidden spreadsheet rows where the Student, 
+    # Exams Done, and Certification are all completely blank.
+    df = df.dropna(subset=BASE_COLUMNS, how='all')
+    # ---------------------------------
+
+    # 4. Check for empty global data (Name, Exams Done, Cert)
+    if df[BASE_COLUMNS].isnull().values.any():
+        problem_rows = df[df[BASE_COLUMNS].isnull().any(axis=1)]
         student_names = problem_rows["STUDENT"].fillna("Missing name").tolist()
-        raise ValueError(f"There are empty cells in the data. Please check the following students:\n{', '.join(student_names)}")
+        raise ValueError(f"There is missing basic data (Name, Exams Done, or Certification) for these students:\n{', '.join(str(s) for s in student_names)}")
 
+    # 5. Check for valid certifications
     valid_certs = []
     for cert_set in config["certification_skills_sets"]:
         valid_certs.extend(cert_set["certifications"])
 
-    invalid_certs = df[~df["CERTIFICATION"].isin(valid_certs)]["STUDENT"].tolist()
-    if invalid_certs:
+    invalid_certs_mask = ~df["CERTIFICATION"].isin(valid_certs)
+    if invalid_certs_mask.any():
+        invalid_students = df[invalid_certs_mask]["STUDENT"].tolist()
         raise ValueError(
-            f"Invalid certification for the following students: {', '.join(invalid_certs)}.\n"
+            f"Invalid certification for the following students: {', '.join(str(s) for s in invalid_students)}.\n"
             f"Allowed certifications in the configuration are: {', '.join(valid_certs)}"
         )
 
-    skill_columns = [col for col in EXPECTED_COLUMNS if col not in ["STUDENT", "EXAMS DONE", "CERTIFICATION"]]
-    for col in skill_columns:
-        try:
-            df[col] = pd.to_numeric(df[col])
-        except ValueError:
-            raise ValueError(f"Column '{col}' contains letters or symbols instead of numbers. Please correct it.")
+    # 6. ROW-BY-ROW VALIDATION using certification_skills_sets
+    problem_students = []
+    for index, row in df.iterrows():
+        student = row["STUDENT"]
+        cert = row["CERTIFICATION"]
+        
+        # Get the specific skills required for THIS student's certification
+        required_skills = []
+        for cert_set in config["certification_skills_sets"]:
+            if cert in cert_set["certifications"]:
+                required_skills = cert_set["skills"]
+                break
+        
+        for skill in required_skills:
+            if skill not in df.columns:
+                raise ValueError(f"Column '{skill}' is required for {cert} students but is missing from the file.")
+            
+            cell_val = row[skill]
+            
+            # If the required cell is empty
+            if pd.isna(cell_val) or str(cell_val).strip() == "":
+                problem_students.append(str(student))
+                break 
+            
+            # If the required cell is not a valid number
+            try:
+                float(cell_val)
+            except ValueError:
+                problem_students.append(str(student))
+                break
+
+    if problem_students:
+        raise ValueError(f"Missing or invalid grades in REQUIRED skills for the following students:\n{', '.join(problem_students)}")
+
+    # 7. Filter the DataFrame cleanly (Base Columns + All Possible Skills)
+    columns_to_keep = BASE_COLUMNS + [c for c in all_possible_skills if c in df.columns]
+    df = df[columns_to_keep].copy()
+
+    # Convert all skill columns to numeric safely
+    for col in all_possible_skills:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
     return df
 
@@ -155,7 +208,7 @@ class RoundedProgressBar(Flowable):
             canv.roundRect(0, 0, fill_width, self.height, fill_radius, fill=1, stroke=0)
         canv.setFillColor(colors.black)
         canv.setFont("Helvetica", 10)
-        canv.drawString(self.width+8, (self.height/2)-3, f"{int(self.value)} %")
+        canv.drawString(self.width+8, (self.height/2)-3, f"{int(round(self.value))} %")
         canv.restoreState()
 
 class SemiCircleGauge(Flowable):
@@ -241,7 +294,7 @@ def draw_footer(c, doc):
     TEXT_ICON_PADDING = 5
     TEXT_LINE_HEIGHT = 12
 
-    phone_numbers = [CONTACTS["phone"]["landline"], CONTACTS["phone"]["mobile"]]
+    phone_numbers = [CONTACTS["phone"].get("landline"), CONTACTS["phone"].get("mobile")]
     phone_lines = [num for num in phone_numbers if num]
 
     contacts = [
@@ -298,7 +351,7 @@ def draw_footer(c, doc):
 # -------------------------
 # Generate PDF per student
 # -------------------------
-def generate_student_pdf(student_row, output_folder):
+def generate_student_pdf(student_row, output_folder, index):
     student = student_row["STUDENT"]
     exam_amount = student_row["EXAMS DONE"]
     certification = student_row["CERTIFICATION"]
@@ -307,15 +360,14 @@ def generate_student_pdf(student_row, output_folder):
     limit_pass = 70
     limit_average = 60
     
-    # Dynamically extract limits based on student's certification
     for certification_skills_set in config["certification_skills_sets"]:
         if certification in certification_skills_set["certifications"]:
             skills = certification_skills_set["skills"]
             limit_pass = certification_skills_set.get("pass_threshold", 70)
             limit_average = certification_skills_set.get("average_threshold", 60)
             
-    safe_name = clean_filename(student)
-    output_filename = os.path.join(output_folder, f"{safe_name}.pdf")
+    safe_name = clean_filename(str(student))
+    output_filename = os.path.join(output_folder, f"{index+1:03d}_{safe_name}.pdf")
 
     doc = SimpleDocTemplate(
         output_filename,
@@ -333,7 +385,6 @@ def generate_student_pdf(student_row, output_folder):
 
     elements = []
     if INTRO_TEXT:
-        # Dynamically inject the limit_pass into the intro text
         formatted_intro = INTRO_TEXT.replace("{min_pass}", str(limit_pass))
         elements.append(Paragraph(formatted_intro, style_justified))
         elements.append(Spacer(1, 10))
@@ -367,8 +418,8 @@ def generate_student_pdf(student_row, output_folder):
     elements.append(t_info)
     elements.append(Spacer(1, 5))
 
-    notes = [student_row[skill] for skill in skills]
-    avg_note = sum(notes) / len(notes)
+    notes = [student_row[skill] for skill in skills if pd.notna(student_row.get(skill))]
+    avg_note = sum(notes) / len(notes) if notes else 0
 
     left_content = [SectionHeader("CALIFICACIÓN INDIVIDUAL", width=240, height=25), Spacer(1, 8)]
     for skill, note in zip(skills, notes):
@@ -397,7 +448,7 @@ def generate_student_pdf(student_row, output_folder):
     elements.append(main_table)
     elements.append(Spacer(1, 10))
 
-    mobile_num = CONTACTS["phone"]["mobile"]
+    mobile_num = CONTACTS["phone"].get("mobile", "")
     clean_num = mobile_num.replace(" ", "")
     
     formatted_doubt_text = ""
@@ -425,12 +476,17 @@ def choose_file_and_run():
     root.withdraw()
 
     file_path = filedialog.askopenfilename(
-        title="Select input file (CSV or Excel)",
-        filetypes=[("Excel files", "*.xlsx *.xls"), ("CSV files", "*.csv")]
+        title="Select input file",
+        filetypes=[
+            ("All Supported Files", "*.xlsx *.xls *.csv *.ods"),
+            ("Excel Files", "*.xlsx *.xls"),
+            ("CSV Files", "*.csv"),
+            ("OpenDocument Spreadsheet", "*.ods")
+        ]
     )
 
     if not file_path:
-        messagebox.showinfo("No file selected", "You must select a CSV or Excel file to continue.")
+        messagebox.showinfo("No file selected", "You must select a valid data file to continue.")
         return
 
     output_folder = "reports"
@@ -438,8 +494,8 @@ def choose_file_and_run():
 
     try:
         df = read_input_file(file_path)
-        for _, row in df.iterrows():
-            generate_student_pdf(row, output_folder)
+        for index, row in df.iterrows():
+            generate_student_pdf(row, output_folder, index)
         messagebox.showinfo("Success", f"All PDFs generated in '{output_folder}'!")
     except Exception as e:
         messagebox.showerror("Error", str(e))
