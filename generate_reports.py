@@ -428,6 +428,14 @@ def generate_student_pdf(student_row, output_folder, index):
         left_content.append(RoundedProgressBar(note, limit_pass, limit_average, width=210))
         left_content.append(Spacer(1, 15))
 
+    # Determine status text based on the three tiers
+    if avg_note >= limit_pass:
+        status_text = "APTO/A"
+    elif avg_note >= limit_average:
+        status_text = "APTO/A<br/>(con observaciones)"
+    else:
+        status_text = "NO APTO/A"
+
     right_content = [
         SectionHeader("CALIFICACIÓN TOTAL", width=200, height=25),
         Indenter(10, 0),
@@ -435,8 +443,7 @@ def generate_student_pdf(student_row, output_folder, index):
         Spacer(1, 2),
         Indenter(-10, 0),
         SectionHeader("ESTADO", width=200, height=20),
-        Paragraph(f"{'APTO/A' if avg_note >= limit_pass else 'NO APTO/A'}",
-                  ParagraphStyle('status', parent=styles['Heading3'], alignment=TA_CENTER, fontSize=16)),
+        Paragraph(status_text, ParagraphStyle('status', parent=styles['Heading3'], alignment=TA_CENTER, fontSize=16)),
     ]
 
     main_table_data = [[left_content, right_content]]
